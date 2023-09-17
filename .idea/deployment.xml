@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" autoUpload="Always" serverName="tf2_prac" remoteFilesAllowedToDisappearOnAutoupload="false">
+    <serverData>
+      <paths name="tf2_prac">
+        <serverdata>
+          <mappings>
+            <mapping deploy="spl_deep_wider_code" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+    <option name="myAutoUpload" value="ALWAYS" />
+  </component>
+</project>
