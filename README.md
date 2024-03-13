@@ -1,4 +1,4 @@
-Xian Wang, "*Enhancing Vocal Melody Extraction by Exploring Multiple Levels of Contexts*," under review.
+Xian Wang, "*Enhancing Vocal Melody Extraction with Multilevel Contexts*," under review.
 
 This is the accompanying code for the above paper.
 
