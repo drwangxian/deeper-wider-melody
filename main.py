@@ -1,21 +1,33 @@
 """
-This is the accompanying code for the paper below.
+1. This is the all-in-one file for training and inferencing.
 
-Xian Wang, "Deeper and Wider Convolutional Recurrent Model for Vocal Melody Extraction"
+2. All results including:
+    the loss,
+    the best voicing threshold,
+    overall accuracy (OA),
+    and other detailed performance measures, like raw pitch accuracy, raw chroma accuracy, voicing accuracy, and more,
+are written to tensorboard, so you can view easily.
 
-tensorflow version: 2.12
-GPU ram: 12 GB
+3. All Parameters can be set in the __init__ function of class Config. These parameters include:
+   the checkpoint for inferencing,
+   the checkpoint used for resuming the training,
+   the prefix used when storing a checkpoint,
+   the directory where the tensorboard is stored,
+   the number of frames for each example,
+   the learning rate,
+   the number of patience epochs,
+   the dataset to use for inferencing.
 
-For your convenience, I have uploaded the checkpoint of the trained model, which is in the folder ckpts.
-This script has been properly configured to run the model in inference mode using the above checkpoint, so you do not need
-to train the model yourself from scratch.
-
-If you would like to train the model yourself, please follow the training process given in the paper, step by step in an
-incremental manner.
+4. Flow for training  or inference:
+    1) Call Config() to create the configuration and the acoustic model
+    2) Call TFDatasetXXX to create tf dataset
+    3) Call MetricsXXX to create something that can gather the metrics
+    4) Call TBSummary to create something that can write metrics to tensorboard
+    5) train or inference
 """
 
-DEBUG = True  # set to True to run in debug mode. Do so to save time.
-GPU_ID = 0
+DEBUG = True  # set to True to run in debug mode for debugging
+GPU_ID = 0  # which GPU to use
 
 import logging
 logging.basicConfig(
@@ -29,7 +41,7 @@ import glob
 import os
 import numpy as np
 import librosa
-from self_defined import ArrayToTableTFFn
+from self_defined import ArrayToTableTFFn  # output tables to tensorboard
 import pitch_local as acoustic_model_module
 import nsgt as nsgt_module
 assert not nsgt_module.USE_DOUBLE
@@ -52,23 +64,23 @@ if DEBUG:
             logger = logging.getLogger(name)
             logger.setLevel(logging.WARNING)
 
-
+# configurable parameters are set in the __init__ function of the class below
 class Config:
 
     def __init__(self):
 
         self.debug_mode = DEBUG
-        Config.set_gpu_fn()
+        Config.set_gpu_fn()  # select gpu
 
         self.train_or_inference = Namespace(
-            inference='d0-24',
-            from_ckpt=None,
-            ckpt_prefix=None
+            inference='d0-24',  # which checkpoint to use for inferencing
+            from_ckpt=None,  # specify a checkpoint to resume the training if you have one
+            ckpt_prefix=None  # prefix used when saving the best checkpoint
         )
-        self.tb_dir = 'tb_inf'
+        self.tb_dir = 'tb_inf'  # folder for tensorboard
 
         if self.train_or_inference.inference is None:
-            self.model_names = ('training', 'validation')
+            self.model_names = ('training', 'validation')  # in training mode, 'test' is not allowed
         else:
             self.model_names = ('training', 'validation', 'test')
 
@@ -76,18 +88,18 @@ class Config:
         if not self.debug_mode:
             self.chk_if_tb_dir_and_model_with_same_prefix_exist_fn()
 
-        self.snippet_len = 1200
-        self.initial_learning_rate = 1e-3
-        self.batches_per_epoch = None
-        self.patience_epochs = 20 if self.debug_mode else 10
+        self.snippet_len = 1200  # the number of spectral frames for each example
+        self.initial_learning_rate = 1e-3  # the learning rate
+        self.batches_per_epoch = None  # automatically set, do not change it.
+        self.patience_epochs = 10 if self.debug_mode else 20  # number of patience epochs
 
-        self.tvt_split_dict = Config.get_dataset_split_fn()
-        if self.debug_mode:
+        self.tvt_split_dict = Config.get_dataset_split_fn()  # get dataset partition of MDB
+        if self.debug_mode:  # in debug mode, we use fewer recordings to save time.
             self.tvt_split_dict['training'] = self.tvt_split_dict['training'][:3]
             self.tvt_split_dict['validation'] = self.tvt_split_dict['validation'][:3]
             self.tvt_split_dict['test'] = self.tvt_split_dict['test'][:3]
 
-        self.acoustic_model_ins = AcousticModel(self)
+        self.acoustic_model_ins = AcousticModel(self)  # construct acoustic model
 
         note_range = TFDataset.note_range
         # build optimizer so as to create relevant optimizer weights
@@ -221,25 +233,31 @@ class Config:
         return track_ids
 
 
+"""
+The class below includes:
+    the deep learning model proposed,
+    the loss function,
+    restoring parameters for the partial and pitch module that were already trained, because in this code we only train the melody module. 
+"""
 class AcousticModel:
 
     def __init__(self, config):
 
-        acoustic_model = acoustic_model_module.create_acoustic_model_fn()
+        acoustic_model = acoustic_model_module.create_acoustic_model_fn()  # create the acoustic model
         assert len(acoustic_model.trainable_variables) > 0
 
         self.acoustic_model = acoustic_model
-        # self.restore_all_but_temporal_fn()
-        self.trainable_variables = self.get_trainable_variables_fn()
-        self.voicing_threshold = tf.Variable(.15, trainable=False, name='voicing_threshold')
+        # self.restore_all_but_temporal_fn()  # uncomment this line when in training mode to restore the trained partial and pitch module
+        self.trainable_variables = self.get_trainable_variables_fn()  # get trainable variables
+        self.voicing_threshold = tf.Variable(.15, trainable=False, name='voicing_threshold')  # the voicing threshold, which is dynamically adjusted
 
-        self.model_for_ckpt = dict(acoustic_model=acoustic_model, voicing_threshold=self.voicing_threshold)
+        self.model_for_ckpt = dict(acoustic_model=acoustic_model, voicing_threshold=self.voicing_threshold)  # we checkpoint the acoustic model and the voicing threshold
         self.config = config
-        self.cutoff_prob = 4e-3
+        self.cutoff_prob = 4e-3  # cutoff probability used Gaussianizing the target label
 
-        self.kernel_indices = self.locate_kernels_for_l2_reg_fn()
+        self.kernel_indices = self.locate_kernels_for_l2_reg_fn()  # locate the kernels for weight decay
         self.n_trainables = len(self.trainable_variables)
-        self.l2_coeff = tf.Variable(0., name='l2_ref_coeff', trainable=False)
+        self.l2_coeff = tf.Variable(0., name='l2_ref_coeff', trainable=False)  # coefficient for weight decay, here we did not use weight decay
 
     def restore_all_but_temporal_fn(self):
 
@@ -267,6 +285,7 @@ class AcousticModel:
             else:
                 assert w.name.startswith('temporal') or w.name.startswith('melody')
 
+    # add weight decay
     def add_l2_grads_fn(self, grads):
 
         assert len(grads) == self.n_trainables
@@ -280,6 +299,7 @@ class AcousticModel:
 
         return grads
 
+    # calling the acoustic model
     def __call__(self, inputs, training):
 
         assert isinstance(training, bool)
@@ -300,6 +320,7 @@ class AcousticModel:
         t1 = tf.logical_or(t1, t2)
         tf.debugging.assert_equal(t1, True)
 
+    # the loss function
     @tf.function(input_signature=[
         tf.TensorSpec([None]),
         tf.TensorSpec([None, 320])
@@ -332,6 +353,7 @@ class AcousticModel:
 
         return loss
 
+    # restored trained modules
     def restore_local_global_part_fn(self):
 
         acoustic_model = self.acoustic_model
@@ -385,9 +407,10 @@ class AcousticModel:
 
         return indices
 
-
+# base class for creating tf dataset
 class TFDataset:
 
+    # create multiple nsgt instances for computing the VQT spectrogram
     nsgt_instances = []
     for power in (17, 18, 19, 20, 21, 22):
         nsgt_ins = nsgt_module.NSGT(2 ** power)
@@ -399,13 +422,13 @@ class TFDataset:
     nsgt_hop_size = 64
     nsgt_freq_bins = 568
 
-    medleydb_dir = os.environ['medleydb']
-    melody2_dir = os.environ['melody2_dir']
+    medleydb_dir = os.environ['medleydb']  # top folder of MDB dataset, /media/hd/datasets/medleydb/V1
+    melody2_dir = os.environ['melody2_dir']  # /home/xian/anaconda2_backup/envs/env_for_tf/lib/python2.7/site-packages/medleydb/data/Annotations/Melody/Melody2
     mix_suffix = '_MIX.wav'
     melody2_suffix = '_MELODY2.csv'
-    min_melody_freq = librosa.midi_to_hz(23.6)
+    min_melody_freq = librosa.midi_to_hz(23.6)  # minimum melody frequency
 
-    note_min = 23.6
+    note_min = 23.6  # minimum MIDI number for melody
     note_range = np.arange(320) / 5.
     note_range = note_range + note_min
     note_range = note_range.astype(np.float32)
@@ -415,6 +438,7 @@ class TFDataset:
 
         self.model = model
 
+    # convert linear scale magnitude spectrogram to dB scale
     @staticmethod
     def spec_transform_fn(spec):
 
@@ -425,6 +449,7 @@ class TFDataset:
 
         return spec
 
+    # generate the VQT spectrogram
     @staticmethod
     def gen_spec_fn(track_id):
 
@@ -444,11 +469,12 @@ class TFDataset:
         num_frames = (num_samples + hop_size - 1) // hop_size
         assert nsgt.shape == (num_frames, num_freq_bins)
         nsgt = nsgt[::4, 1:501]
-        nsgt = TFDataset.spec_transform_fn(nsgt)
+        nsgt = TFDataset.spec_transform_fn(nsgt)  # to db scale
         nsgt = np.require(nsgt, np.float32, requirements=['O', 'C'])
 
         return nsgt
 
+    # hz to midi
     @staticmethod
     def hz_to_midi_fn(freqs):
 
@@ -458,6 +484,7 @@ class TFDataset:
 
         return notes
 
+    # midi to hz
     @staticmethod
     def midi_to_hz_fn(notes):
 
@@ -469,6 +496,7 @@ class TFDataset:
 
         return freqs
 
+    # generate ground-truth labels
     @staticmethod
     def gen_label_fn(track_id):
 
@@ -518,6 +546,7 @@ class TFDataset:
 
         return result
 
+    # generate numpy dataset
     def gen_np_dataset_fn(self):
 
         assert not hasattr(self, 'np_dataset')
@@ -567,6 +596,7 @@ class TFDataset:
         if note_max < lower_note or note_max > upper_note:
             logging.warning('note max - {} - out of range'.format(note_max))
 
+    # cut spectrogram into short snippets
     @staticmethod
     def gen_split_list_fn(num_frames, snippet_len):
 
@@ -590,6 +620,7 @@ class TFDataset:
         assert np.all(all_valid)
 
 
+# create a tf dataset for the training split in training mode
 class TFDatasetForTrainingModeTrainingSplit(TFDataset):
 
     def __init__(self, model):
@@ -661,6 +692,8 @@ class TFDatasetForTrainingModeTrainingSplit(TFDataset):
             logging.info('batches per epoch set to {}'.format(batches_per_epoch))
 
 
+# create tf dataset for inference mode
+# It is used for validation split in training model, or all splits in inference mode
 class TFDatasetForInferenceMode(TFDataset):
 
     def __init__(self, model):
@@ -742,6 +775,7 @@ class TFDatasetForInferenceMode(TFDataset):
         return dataset
 
 
+# create tf dataset for ADC04 dataset
 class TFDatasetForAdc04(TFDataset):
 
     def __init__(self, model):
@@ -901,6 +935,7 @@ class TFDatasetForAdc04(TFDataset):
         return dataset
 
 
+# create tf dataset for MIREX05 dataset
 class TFDatasetForMirex05(TFDataset):
 
     def __init__(self, model):
@@ -1077,6 +1112,7 @@ class TFDatasetForMirex05(TFDataset):
         return dataset
 
 
+# create tf dataset for MIR-1K dataset
 class TFDatasetForMir1k(TFDataset):
 
     def __init__(self, model):
@@ -1273,6 +1309,7 @@ class TFDatasetForMir1k(TFDataset):
         return dataset
 
 
+# create tf dataset for RWC dataset
 class TFDatasetForRWC(TFDataset):
 
     def __init__(self, model):
@@ -1527,6 +1564,7 @@ class TFDatasetForRWC(TFDataset):
         return dataset
 
 
+# compute metrics for training split in training mode
 class MetricsTrainingModeTrainingSplit:
 
     def __init__(self, model):
@@ -1780,6 +1818,7 @@ class MetricsTrainingModeTrainingSplit:
         return results
 
 
+# a base metric class
 class MetricsBase:
 
     """
@@ -1884,6 +1923,7 @@ class MetricsBase:
         return distance
 
 
+# compute metrics for validation split in training mode
 class MetricsValidation(MetricsBase):
 
     def __init__(self, model):
@@ -2196,6 +2236,7 @@ class MetricsValidation(MetricsBase):
         return results
 
 
+# compute metrics for all splits in inference mode
 class MetricsInference(MetricsBase):
 
     def __init__(self, model):
@@ -2507,7 +2548,7 @@ class MetricsInference(MetricsBase):
 
         return oa
 
-
+# write metrics to tensorboard
 class TBSummary:
 
     def __init__(self, model):
@@ -2611,6 +2652,7 @@ class TBSummary:
                 self.table_ins.write(data, step_int)
 
 
+# create model
 class Model:
 
     def __init__(self, config, name):
@@ -2622,10 +2664,11 @@ class Model:
         if not inferencing:
             assert 'test' not in name
 
-        self.name = name
+        self.name = name  # split name
         self.is_training = True if 'train' in name else False
         self.config = config
 
+        # create tf dataset
         if inferencing:
             self.tf_dataset = TFDatasetForInferenceMode(self)
         else:
@@ -2634,6 +2677,7 @@ class Model:
             else:
                 self.tf_dataset = TFDatasetForInferenceMode(self)
 
+        # gather metrics
         if inferencing:
             self.metrics = MetricsInference(self)
         else:
@@ -2642,6 +2686,7 @@ class Model:
             else:
                 self.metrics = MetricsValidation(self)
 
+        # save metrics
         self.tb_summary_ins = TBSummary(self)
 
 
@@ -2649,10 +2694,11 @@ def main():
 
 
     MODEL_DICT = {}
-    MODEL_DICT['config'] = Config()
+    MODEL_DICT['config'] = Config()  # crete configuration
     for name in MODEL_DICT['config'].model_names:
-        MODEL_DICT[name] = Model(config=MODEL_DICT['config'], name=name)
+        MODEL_DICT[name] = Model(config=MODEL_DICT['config'], name=name)  # create model for different splits
 
+    # display information
     aug_info = []
     aug_info.append('tb dir - {}'.format(MODEL_DICT['config'].tb_dir))
     aug_info.append('debug mode - {}'.format(MODEL_DICT['config'].debug_mode))
@@ -2667,6 +2713,7 @@ def main():
     with MODEL_DICT['training'].tb_summary_ins.tb_summary_writer.as_default():
         tf.summary.text('auxiliary_information', aug_info, step=0)
 
+    # training function
     def training_fn(global_step=None):
 
         assert isinstance(global_step, int)
@@ -2705,6 +2752,7 @@ def main():
         v_th = model.metrics.current_voicing_threshold
         logging.info('{} - step - {} - loss - {} - oa - {} - voicing threshold - {}'.format(model.name, global_step, loss, oa, v_th))
 
+    # function shared by validation and inference
     def inference_fn(model_name, global_step=None):
 
         config = MODEL_DICT['config']
@@ -2763,7 +2811,7 @@ def main():
             diff = tf_oa - mir_eval_oa
             print('ave', tf_oa, mir_eval_oa, diff)
 
-    if MODEL_DICT['config'].train_or_inference.inference is not None:
+    if MODEL_DICT['config'].train_or_inference.inference is not None:  # inference
         ckpt_file = MODEL_DICT['config'].train_or_inference.inference
         ckpt_dir, ckpt_name = os.path.split(ckpt_file)
         if ckpt_dir == '':
@@ -2780,7 +2828,7 @@ def main():
             inference_fn(model_name, global_step=0)
             MODEL_DICT[model_name].tb_summary_ins.tb_summary_writer.close()
 
-    elif MODEL_DICT['config'].train_or_inference.from_ckpt is not None:
+    elif MODEL_DICT['config'].train_or_inference.from_ckpt is not None:  # resume training
         ckpt = tf.train.Checkpoint(
             model=MODEL_DICT['config'].acoustic_model_ins.model_for_ckpt,
             optimizer=MODEL_DICT['config'].optimizer
@@ -2800,13 +2848,14 @@ def main():
         best_oa = MODEL_DICT[model_name].metrics.oa
         assert best_oa is not None
         best_epoch = 0
-    else:
+    else:  # train from scratch
         logging.info('training from scratch ...')
         best_oa = None
 
     # training
     if MODEL_DICT['config'].train_or_inference.inference is None:
 
+        # checkpointing configuration
         assert MODEL_DICT['config'].train_or_inference.ckpt_prefix is not None
         assert 'ckpt_manager' not in MODEL_DICT
         ckpt = tf.train.Checkpoint(
@@ -2820,7 +2869,7 @@ def main():
         ckpt_manager = tf.train.CheckpointManager(
             ckpt,
             directory=ckpt_dir,
-            max_to_keep=1,
+            max_to_keep=1,  # only save the best checkpoint
             checkpoint_name=ckpt_prefix
         )
         MODEL_DICT['ckpt_manager'] = ckpt_manager
@@ -2841,6 +2890,7 @@ def main():
                 elif 'validation' in model_name:
                     inference_fn(model_name, training_epoch)
 
+            # checkpoint the model
             valid_oa = MODEL_DICT['validation'].metrics.oa
             should_save = best_oa is None or best_oa < valid_oa
             if should_save:
@@ -2849,6 +2899,7 @@ def main():
                 save_path = MODEL_DICT['ckpt_manager'].save(checkpoint_number=training_epoch)
                 logging.info('weights checkpointed to {}'.format(save_path))
 
+            # if patience epochs haven been reach, then stop training
             d = training_epoch - best_epoch
             if d >= patience_epochs:
                 logging.info('training terminated at epoch {}'.format(training_epoch))
@@ -2856,6 +2907,7 @@ def main():
 
             training_epoch = training_epoch + 1
 
+        # close tb summary writers
         for model_name in MODEL_DICT['config'].model_names:
             model = MODEL_DICT[model_name]
             model.tb_summary_ins.tb_summary_writer.close()
